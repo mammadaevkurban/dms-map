@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>Карта компаний без ДМС (Москва)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <!-- Leaflet CSS -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+
+  <style>
+    html,
+    body,
+    #map {
+      height: 100%;
+      margin: 0;
+      padding: 0;
+    }
+
+    /* Спрятать флаг/надпись Leaflet полностью */
+    .leaflet-control-attribution {
+      display: none !important;
+    }
+
+    .popup-card {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+        sans-serif;
+      font-size: 13px;
+      max-width: 360px;
+    }
+
+    .popup-title {
+      font-weight: 700;
+      font-size: 14px;
+      margin-bottom: 4px;
+    }
+
+    .popup-row {
+      margin-bottom: 3px;
+      line-height: 1.3;
+    }
+
+    .popup-label {
+      font-weight: 600;
+    }
+
+    .popup-done-btn {
+      margin-top: 6px;
+      font-size: 12px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      border: 1px solid #00b894;
+      background: #e0f7f4;
+      cursor: pointer;
+    }
+
+    .popup-done-btn:hover {
+      background: #b2f1e5;
+    }
+
+    .credit {
+      position: fixed;
+      bottom: 5px;
+      right: 5px;
+      z-index: 9999;
+      font-size: 10px;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+        sans-serif;
+      color: #000000;
+      background-color: rgba(255, 255, 255, 0.7);
+      padding: 2px 6px;
+      border-radius: 4px;
+      box-shadow: 0 0 3px rgba(0, 0, 0, 0.2);
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div class="credit">Карту разработал Маммадаев Курбан</div>
+
+  <!-- Leaflet JS -->
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+
+  <script>
+    // Опорная точка (Писцовая, 10с5)
+    const OFFICE_LAT = 55.799315;
+    const OFFICE_LON = 37.578433;
+
+    // Диапазоны расстояний и цвета
+    const DIST_BUCKETS = [
+      { min: 0, max: 3,  name: '0–3 км',  color: '#004d00' },
+      { min: 3, max: 5,  name: '3–5 км',  color: '#008000' },
+      { min: 5, max: 7,  name: '5–7 км',  color: '#66bb6a' },
+      { min: 7, max: 10, name: '7–10 км', color: '#ff9800' },
+      { min: 10, max: 15, name: '10–15 км', color: '#f44336' },
+      { min: 15, max: 20, name: '15–20 км', color: '#8e24aa' },
+      { min: 20, max: 25, name: '20–25 км', color: '#1565c0' }
+    ];
+    const DEFAULT_BUCKET = {
+      min: 25,
+      max: Infinity,
+      name: '≥25 км',
+      color: '#757575'
+    };
+
+    function getBucket(dist) {
+      for (const b of DIST_BUCKETS) {
+        if (dist >= b.min && dist < b.max) return b;
+      }
+      return DEFAULT_BUCKET;
+    }
+
+    // ID компании для localStorage
+    function getCompanyId(rec, index) {
+      if (rec.inn && rec.address) {
+        return rec.inn + '|' + rec.address;
+      }
+      return (rec.name || '') + '|' + rec.lat + '|' + rec.lon + '|' + index;
+    }
+
+    const DONE_PREFIX = 'company_done_v2_';
+
+    function isDone(id) {
+      return localStorage.getItem(DONE_PREFIX + id) === '1';
+    }
+
+    function setDone(id, val) {
+      localStorage.setItem(DONE_PREFIX + id, val ? '1' : '0');
+    }
+
+    // Радиус маркера по количеству сотрудников
+    function employeeToRadius(emp) {
+      const n = Number(emp) || 0;
+      if (n > 50000) return 11;
+      if (n > 20000) return 9;
+      if (n > 5000)  return 7;
+      if (n > 1000)  return 6;
+      if (n > 0)     return 5;
+      return 4;
+    }
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    // --- Карта ---
+    const map = L.map('map').setView([OFFICE_LAT, OFFICE_LON], 11);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    L.marker([OFFICE_LAT, OFFICE_LON])
+      .addTo(map)
+      .bindPopup('Писцовая ул., 10с5 (опорная точка)');
+
+    // Группы слоёв по диапазонам расстояний
+    const layers = {};
+    [...DIST_BUCKETS, DEFAULT_BUCKET].forEach((b) => {
+      layers[b.name] = L.layerGroup();
+    });
+
+    const overlays = {};
+    Object.keys(layers).forEach((name) => {
+      overlays[name] = layers[name];
+    });
+
+    // по умолчанию показываем всё до 10 км
+    const maxDefault = 10;
+    DIST_BUCKETS.forEach((b) => {
+      if (b.min < maxDefault) {
+        layers[b.name].addTo(map);
+      }
+    });
+
+    L.control.layers(null, overlays, { collapsed: false }).addTo(map);
+
+    // --- загрузка JSON ---
+    fetch('companies_no_dms_moscow.json')
+      .then((r) => r.json())
+      .then((data) => {
+        data.forEach((rec, index) => {
+          const dist = Number(rec.dist);
+          const lat = Number(rec.lat);
+          const lon = Number(rec.lon);
+          if (isNaN(dist) || isNaN(lat) || isNaN(lon)) return;
+
+          const bucket = getBucket(dist);
+          const group = layers[bucket.name] || layers[DEFAULT_BUCKET.name];
+
+          const id = getCompanyId(rec, index);
+          const doneInitial = isDone(id);
+
+          const radius = employeeToRadius(rec.employees);
+
+          function applyMarkerStyle(marker, done) {
+            if (done) {
+              marker.setStyle({
+                radius: radius,
+                weight: 2,
+                color: '#00b894',      // зелёная рамка
+                fillColor: '#c8e6c9',  // светло-зелёный внутри
+                fillOpacity: 0.9
+              });
+            } else {
+              marker.setStyle({
+                radius: radius,
+                weight: 1,
+                color: '#222222',
+                fillColor: bucket.color,
+                fillOpacity: 0.6
+              });
+            }
+          }
+
+          const marker = L.circleMarker([lat, lon], {
+            radius: radius,
+            weight: 1,
+            color: '#222222',
+            fillColor: bucket.color,
+            fillOpacity: 0.6
+          }).addTo(group);
+
+          // сразу стиль по сохранённому состоянию
+          applyMarkerStyle(marker, doneInitial);
+
+          // Кликабельный телефон
+          const phonePlain = rec.phone || '';
+          let phoneHtml = escapeHtml(phonePlain);
+          if (phonePlain) {
+            const phoneHref = phonePlain.replace(/[^+\d]/g, '');
+            if (phoneHref) {
+              phoneHtml = `<a href="tel:${phoneHref}">${escapeHtml(
+                phonePlain
+              )}</a>`;
+            }
+          }
+
+          // E-mail
+          const emailPlain = rec.email || '';
+          let emailHtml = escapeHtml(emailPlain);
+          if (emailPlain) {
+            emailHtml = `<a href="mailto:${escapeHtml(
+              emailPlain
+            )}">${escapeHtml(emailPlain)}</a>`;
+          }
+
+          // Сайт
+          const sitePlain = rec.site || '';
+          let siteHtml = escapeHtml(sitePlain);
+          if (sitePlain) {
+            let url = sitePlain.trim();
+            if (url && !/^https?:\/\//i.test(url)) {
+              url = 'http://' + url;
+            }
+            siteHtml = `<a href="${escapeHtml(url)}" target="_blank">${escapeHtml(
+              sitePlain
+            )}</a>`;
+          }
+
+          // list-org / вакансия
+          const listOrg = rec.listorg_url
+            ? `<a href="${escapeHtml(
+                rec.listorg_url
+              )}" target="_blank">Карточка на list-org</a>`
+            : '';
+          const vacancy = rec.vacancy_url
+            ? `<br><a href="${escapeHtml(
+                rec.vacancy_url
+              )}" target="_blank">Вакансия с ДМС</a>`
+            : '';
+
+          const domBtnId = 'done-btn-' + index;
+          const statusSpanId = 'status-span-' + index;
+
+          const popupHtml = `
+            <div class="popup-card">
+              <div class="popup-title">${escapeHtml(rec.name || '')}</div>
+              <div class="popup-row">
+                <span class="popup-label">Сотрудников:</span>
+                ${rec.employees || '—'}
+              </div>
+              <div class="popup-row">
+                <span class="popup-label">Расстояние:</span>
+                ${dist.toFixed(2)} км
+              </div>
+              <div class="popup-row">
+                <span class="popup-label">Телефон:</span> ${phoneHtml}
+              </div>
+              <div class="popup-row">
+                <span class="popup-label">E-mail:</span> ${emailHtml}
+              </div>
+              <div class="popup-row">
+                <span class="popup-label">Сайт:</span> ${siteHtml}
+              </div>
+              <div class="popup-row">
+                <span class="popup-label">ИНН:</span> ${escapeHtml(
+                  rec.inn || ''
+                )}
+                &nbsp;|&nbsp;
+                <span class="popup-label">ОГРН:</span> ${escapeHtml(
+                  rec.ogrn || ''
+                )}
+              </div>
+              <div class="popup-row">
+                <span class="popup-label">Статус:</span>
+                ${escapeHtml(rec.status || '')}
+              </div>
+              <div class="popup-row">
+                <span class="popup-label">Адрес:</span>
+                ${escapeHtml(rec.address || '')}
+              </div>
+              <div class="popup-row">
+                ${listOrg}${vacancy}
+              </div>
+              <div class="popup-row">
+                <span class="popup-label">Обработка:</span>
+                <span id="${statusSpanId}">${
+                  doneInitial ? 'Отработано ✔' : 'Не отработано'
+                }</span>
+              </div>
+              <button id="${domBtnId}" class="popup-done-btn">
+                ${doneInitial ? 'Снять отметку' : 'Отметить как отработано'}
+              </button>
+            </div>
+          `;
+
+          marker.bindPopup(popupHtml);
+
+          // обработчик при открытии попапа
+          marker.on('popupopen', () => {
+            const btn = document.getElementById(domBtnId);
+            const span = document.getElementById(statusSpanId);
+            if (!btn || !span) return;
+
+            // при каждом открытии синхронизируем с localStorage
+            let currentDone = isDone(id);
+            span.textContent = currentDone
+              ? 'Отработано ✔'
+              : 'Не отработано';
+            btn.textContent = currentDone
+              ? 'Снять отметку'
+              : 'Отметить как отработано';
+            applyMarkerStyle(marker, currentDone);
+
+            btn.onclick = () => {
+              currentDone = !isDone(id);
+              setDone(id, currentDone);
+              span.textContent = currentDone
+                ? 'Отработано ✔'
+                : 'Не отработано';
+              btn.textContent = currentDone
+                ? 'Снять отметку'
+                : 'Отметить как отработано';
+              applyMarkerStyle(marker, currentDone);
+            };
+          });
+        });
+      })
+      .catch((err) => {
+        console.error('Ошибка загрузки JSON:', err);
+        alert('Не удалось загрузить companies_no_dms_moscow.json');
+      });
+  </script>
+</body>
+</html>
